@@ -24,6 +24,18 @@ from sklearn.preprocessing import StandardScaler
 from archs import Net2, Net3, Net4, Net5, Net6, Net7, Net2r, Net3r, Net4r, Net5r, Net6r, Net7r, Net2s, Net3s, Net4s, Net5s, Net6s, Net7s
 import torch
 
+import os
+import time
+import torch
+import math
+import sklearn
+import importlib
+import torch.optim as optim
+import torch.nn as nn
+import torch.nn.functional as F
+import util.smartparse as smartparse
+import util.db as db
+
 
 class Detector(AbstractDetector):
     def __init__(self, metaparameter_filepath, learned_parameters_dirpath, scale_parameters_filepath):
@@ -35,53 +47,12 @@ class Detector(AbstractDetector):
             scale_parameters_filepath: str - File path to the scale_parameters file.
         """
         metaparameters = json.load(open(metaparameter_filepath, "r"))
-
+        self.params=smartparse.dict2obj(metaparameters)
+        
         self.scale_parameters_filepath = scale_parameters_filepath
         self.metaparameter_filepath = metaparameter_filepath
         self.learned_parameters_dirpath = learned_parameters_dirpath
-        self.model_filepath = join(self.learned_parameters_dirpath, "model.bin")
-        self.models_padding_dict_filepath = join(self.learned_parameters_dirpath, "models_padding_dict.bin")
-        self.model_layer_map_filepath = join(self.learned_parameters_dirpath, "model_layer_map.bin")
-        self.layer_transform_filepath = join(self.learned_parameters_dirpath, "layer_transform.bin")
-
-        # TODO: Update skew parameters per round
-        self.model_skew = {
-            "__all__": metaparameters["infer_cyber_model_skew"],
-        }
-
-        self.input_features = metaparameters["train_input_features"]
-        self.weight_table_params = {
-            "random_seed": metaparameters["train_weight_table_random_state"],
-            "mean": metaparameters["train_weight_table_params_mean"],
-            "std": metaparameters["train_weight_table_params_std"],
-            "scaler": metaparameters["train_weight_table_params_scaler"],
-        }
-        self.random_forest_kwargs = {
-            "n_estimators": metaparameters[
-                "train_random_forest_regressor_param_n_estimators"
-            ],
-            "criterion": metaparameters[
-                "train_random_forest_regressor_param_criterion"
-            ],
-            "max_depth": metaparameters[
-                "train_random_forest_regressor_param_max_depth"
-            ],
-            "min_samples_split": metaparameters[
-                "train_random_forest_regressor_param_min_samples_split"
-            ],
-            "min_samples_leaf": metaparameters[
-                "train_random_forest_regressor_param_min_samples_leaf"
-            ],
-            "min_weight_fraction_leaf": metaparameters[
-                "train_random_forest_regressor_param_min_weight_fraction_leaf"
-            ],
-            "max_features": metaparameters[
-                "train_random_forest_regressor_param_max_features"
-            ],
-            "min_impurity_decrease": metaparameters[
-                "train_random_forest_regressor_param_min_impurity_decrease"
-            ],
-        }
+        
 
     def write_metaparameters(self):
         metaparameters = {
@@ -104,124 +75,198 @@ class Detector(AbstractDetector):
         with open(join(self.learned_parameters_dirpath, basename(self.metaparameter_filepath)), "w") as fp:
             json.dump(metaparameters, fp)
     
+    #Extract dataset from a folder of training models
+    def extract_dataset(self,models_dirpath,params):
+        data=db.Table({'model_id':[],'model_name':[],'fvs':[],'label':[]}); # label currently incorrect
+        data=db.DB({'table_ann':data});
+        
+        t0=time.time()
+        
+        default_params=smartparse.obj();
+        default_params.nbins=100;
+        default_params.szcap=4096;
+        default_params.fname='data_cyber-pdf_weight.pt'
+        params=smartparse.merge(params,default_params)
+        
+        data.d['params']=db.Table.from_rows([vars(params)]);
+        
+        models=os.listdir(models_dirpath);
+        models=sorted(models)
+        import weight_analysis as feature_extractor
+        for i,fname in enumerate(models):
+            print(i,fname)
+            _,fv=feature_extractor.extract_fv(fname,params=params,scale_parameters_filepath=self.scale_parameters_filepath,root=models_dirpath);
+            
+            #Load GT
+            fname_gt=os.path.join(models_dirpath,fname,'ground_truth.csv');
+            f=open(fname_gt,'r');
+            for line in f:
+                line.rstrip('\n').rstrip('\r')
+                label=int(line);
+                break;
+            
+            f.close();
+            
+            
+            data['table_ann']['model_name'].append(fname);
+            data['table_ann']['model_id'].append(i);
+            data['table_ann']['label'].append(label);
+            data['table_ann']['fvs'].append(fv);
+            
+            print('Model %d(%s), time %f'%(i,fname,time.time()-t0));
+        
+        return data;
+    
+    def train(self,crossval_splits,params_):
+        max_batch=16;
+        arch_=importlib.import_module(params_.arch);
+        #Run splits
+        t0=time.time();
+        nets=[];
+        for split_id,split in enumerate(crossval_splits):
+            data_train,data_val,data_test=split;
+            net=arch_.new(params_).cuda();
+            opt=optim.Adam(net.parameters(),lr=params_.lr); #params_.lr
+            
+            #Training
+            for iter in range(params_.epochs):
+                #print('iter %d/%d'%(iter,params_.epochs))
+                net.train();
+                for data_batch in data_train.batches(params_.batch,shuffle=True,full=True):
+                    opt.zero_grad();
+                    net.zero_grad();
+                    data_batch.cuda();
+                    C=data_batch['label'];
+                    data_batch.delete_column('label');
+                    scores_i=net(data_batch);
+                    
+                    #loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
+                    spos=scores_i.gather(1,C.view(-1,1)).mean();
+                    sneg=torch.exp(scores_i).mean();
+                    loss=-(spos-sneg+1);
+                    l2=0;
+                    for p in net.parameters():
+                        l2=l2+(p**2).sum();
+                    
+                    loss=loss+l2*params_.decay;
+                    loss.backward();
+                    opt.step();
+            
+            net.eval();
+            nets.append(net);
+        
+        #Calibration
+        scores=[];
+        gt=[];
+        for split_id,split in enumerate(crossval_splits):
+            data_train,data_val,data_test=split;
+            net=nets[split_id];
+            for data_batch in data_val.batches(max_batch):
+                data_batch.cuda();
+                
+                C=data_batch['label'];
+                data_batch.delete_column('label');
+                scores_i=net.logp(data_batch);
+                scores.append(scores_i.data);
+                gt.append(C);
+        
+        scores=torch.cat(scores,dim=0);
+        gt=torch.cat(gt,dim=0);
+        
+        T=torch.Tensor(1).fill_(0).cuda();
+        T.requires_grad_();
+        opt2=optim.Adamax([T],lr=3e-2);
+        for iter in range(500):
+            opt2.zero_grad();
+            loss=F.binary_cross_entropy_with_logits(scores*torch.exp(-T),gt.float().cuda());
+            loss.backward();
+            opt2.step();
+        
+        #Eval & store
+        scores=[];
+        scores_pre=[];
+        gt=[]
+        model_name=[]
+        ensemble=[];
+        for split_id,split in enumerate(crossval_splits):
+            data_train,data_val,data_test=split;
+            net=nets[split_id];
+            ensemble.append({'net':net.state_dict(),'params':params_,'T':float(T.data.cpu())})
+            for data_batch in data_test.batches(max_batch):
+                data_batch.cuda();
+                
+                C=data_batch['label'];
+                data_batch.delete_column('label');
+                scores_i=net.logp(data_batch);
+                
+                scores.append((scores_i*torch.exp(-T)).data.cpu());
+                scores_pre.append(scores_i.data.cpu());
+                model_name=model_name+data_batch['model_name'];
+                
+                gt.append(C.data.cpu());
+        
+        scores=torch.cat(scores,dim=0);
+        scores_pre=torch.cat(scores_pre,dim=0);
+        gt=torch.cat(gt,dim=0);
+        
+        def compute_metrics(scores,gt,keys=None):
+            #Overall
+            auc=float(sklearn.metrics.roc_auc_score(torch.LongTensor(gt).numpy(),torch.Tensor(scores).numpy()));
+            #ce_=float(F.binary_cross_entropy_with_logits(torch.Tensor(scores),torch.Tensor(gt)));
+            sgt=F.logsigmoid(torch.Tensor(scores)*(torch.Tensor(gt)*2-1))
+            ce=-sgt.mean();
+            cestd=sgt.std()/len(sgt)**0.5;
+            return auc,ce,cestd;
+        
+        auc,ce,cestd=compute_metrics(scores.tolist(),gt.tolist());
+        _,cepre,ceprestd=compute_metrics(scores_pre.tolist(),gt.tolist());
+        mistakes=[];
+        for i in range(len(gt)):
+            if int(gt[i])==1 and float(scores[i])<=0:
+                mistakes.append(model_name[i]);
+        
+        mistakes=sorted(mistakes);
+        
+        print('AUC: %f, CE: %f + %f, CEpre: %f + %f, time %.2f'%(auc,ce,cestd,cepre,ceprestd,time.time()-t0));
+        print('Mistakes: '+','.join(['%s'%i for i in mistakes]));
+        print('\n')
+        
+        return ensemble
+        
+    
+    
+    #Retraining logic
     def automatic_configure(self, models_dirpath: str):
-        """Configuration of the detector iterating on some of the parameters from the
-        metaparameter file, performing a grid search type approach to optimize these
-        parameters.
-
-        Args:
-            models_dirpath: str - Path to the list of model to use for training
-        """
-        for random_seed in np.random.randint(1000, 9999, 10):
-            self.weight_table_params["random_seed"] = random_seed
-            self.manual_configure(models_dirpath)
+        #Extract dataset
+        #data=self.extract_dataset(models_dirpath,params=self.params)
+        data='data_cyber-pdf_weight.pt'
+        #Create dataloader
+        import dataloader
+        data=dataloader.new(data)
+        
+        #In case features are a list, send tensors to cuda ahead of time to speed up training
+        data.cuda()
+        for k in data.data['table_ann'].d.keys():
+            if isinstance(data.data['table_ann'][k],list):
+                if len(data.data['table_ann'][k])>0 and torch.is_tensor(data.data['table_ann'][k][0]):
+                    print('sending to cuda')
+                    for i in range(len(data.data['table_ann'][k])):
+                        data.data['table_ann'][k][i]=data.data['table_ann'][k][i].cuda();
+        
+        #Create crossval folds
+        folds=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        crossval_splits=[(data_train,data_test,data_test) for data_train,data_test in folds] #train val test
+        
+        #Perform training
+        ensemble=self.train(crossval_splits,self.params)
+        torch.save(ensemble,os.path.join(self.learned_parameters_dirpath,'model.pt'))
+        return True
     
     def manual_configure(self, models_dirpath: str):
-        """Configuration of the detector using the parameters from the metaparameters
-        JSON file.
-
-        Args:
-            models_dirpath: str - Path to the list of model to use for training
-        """
-        # Create the learned parameter folder if needed
-        if not exists(self.learned_parameters_dirpath):
-            makedirs(self.learned_parameters_dirpath)
-
-        # List all available model
-        model_path_list = sorted([join(models_dirpath, model) for model in listdir(models_dirpath)])
-        logging.info(f"Loading %d models...", len(model_path_list))
-
-        model_repr_dict, model_ground_truth_dict = load_models_dirpath(model_path_list)
-
-        models_padding_dict = create_models_padding(model_repr_dict)
-        with open(self.models_padding_dict_filepath, "wb") as fp:
-            pickle.dump(models_padding_dict, fp)
-
-        for model_class, model_repr_list in model_repr_dict.items():
-            for index, model_repr in enumerate(model_repr_list):
-                model_repr_dict[model_class][index] = pad_model(model_repr, model_class, models_padding_dict)
-
-        check_models_consistency(model_repr_dict)
-
-        # Build model layer map to know how to flatten
-        logging.info("Generating model layer map...")
-        model_layer_map = create_layer_map(model_repr_dict)
-        with open(self.model_layer_map_filepath, "wb") as fp:
-            pickle.dump(model_layer_map, fp)
-        logging.info("Generated model layer map. Flattenning models...")
-
-        # Flatten models
-        flat_models = flatten_models(model_repr_dict, model_layer_map)
-        del model_repr_dict
-        logging.info("Models flattened. Fitting feature reduction...")
-
-        layer_transform = fit_feature_reduction_algorithm(flat_models, self.weight_table_params, self.input_features)
-
-        logging.info("Feature reduction applied. Creating feature file...")
-        X = None
-        y = []
-
-        for _ in range(len(flat_models)):
-            (model_arch, models) = flat_models.popitem()
-            model_index = 0
-
-            logging.info("Parsing %s models...", model_arch)
-            for _ in tqdm(range(len(models))):
-                model = models.pop(0)
-                y.append(model_ground_truth_dict[model_arch][model_index])
-                model_index += 1
-
-                model_feats = use_feature_reduction_algorithm(
-                    layer_transform[model_arch], model
-                )
-                if X is None:
-                    X = model_feats
-                    continue
-
-                X = np.vstack((X, model_feats)) * self.model_skew["__all__"]
-
-        logging.info("Training RandomForestRegressor model...")
-        model = RandomForestRegressor(**self.random_forest_kwargs, random_state=0)
-        model.fit(X, y)
-
-        logging.info("Saving RandomForestRegressor model...")
-        with open(self.model_filepath, "wb") as fp:
-            pickle.dump(model, fp)
-
-        self.write_metaparameters()
-        logging.info("Configuration done!")
-    
-    def inference_on_example_data(self, model, examples_dirpath):
-        """Method to demonstrate how to inference on a round's example data.
-        
-        Args:
-            model: the pytorch model
-            examples_dirpath: the directory path for the round example data
-        """
-        
-        # Setup scaler
-        scaler = StandardScaler()
-        
-        scale_params = np.load(self.scale_parameters_filepath)
-        
-        scaler.mean_ = scale_params[0]
-        scaler.scale_ = scale_params[1]
-        
-        # Inference on models
-        for examples_dir_entry in os.scandir(examples_dirpath):
-            if examples_dir_entry.is_file() and examples_dir_entry.name.endswith(".npy"):
-                feature_vector = np.load(examples_dir_entry.path).reshape(1, -1)
-                feature_vector = torch.from_numpy(scaler.transform(feature_vector.astype(float))).float()
-                
-                pred = torch.argmax(model(feature_vector).detach()).item()
-                
-                ground_tuth_filepath = examples_dir_entry.path + ".json"
-                
-                with open(ground_tuth_filepath, 'r') as ground_truth_file:
-                    ground_truth =  ground_truth_file.readline()
-                
-                print("Model: {}, Ground Truth: {}, Prediction: {}".format(examples_dir_entry.name, ground_truth, str(pred)))
-    
+        return self.automatic_configure(models_dirpath)
     
     def infer(
         self,
@@ -247,7 +292,8 @@ class Detector(AbstractDetector):
         import math
         
         _,fv=feature_extractor.extract_fv(model_filepath=model_filepath, scratch_dirpath=scratch_dirpath, examples_dirpath=examples_dirpath, scale_parameters_filepath=self.scale_parameters_filepath)
-        fvs=db.Table.from_rows([{'fvs':fv}]);
+        #fvs=db.Table.from_rows([{'fvs':fv}]);
+        fvs=db.Table({'fvs':[fv]})
         
         import importlib
         import pandas
@@ -266,8 +312,8 @@ class Detector(AbstractDetector):
                 arch_=importlib.import_module(params_.arch);
                 net=arch_.new(params_);
                 
-                net.load_state_dict(checkpoint[i]['net']);
-                net=net.cuda();
+                net.load_state_dict(checkpoint[i]['net'],strict=True);
+                #net=net.cuda();
                 net.eval();
                 
                 s_i=net.logp(fvs).data.cpu();
@@ -284,3 +330,4 @@ class Detector(AbstractDetector):
             fp.write('%f'%trojan_probability)
 
         logging.info("Trojan probability: %f", trojan_probability)
+        return trojan_probability

@@ -93,7 +93,7 @@ def run(interface,nbins=100,szcap=4096):
     data=interface.load_examples();
     examples=data['fvs']
     labels=data['labels']
-    for param in interface.model.parameters():
+    for i,param in enumerate(interface.model.parameters()):
         fvs=fvs+analyze(param.data.cuda(),nbins=nbins,szcap=szcap);
     
     fvs_examples=[];
@@ -101,16 +101,20 @@ def run(interface,nbins=100,szcap=4096):
         fvs_example_i=[]
         interface.model.zero_grad()
         #print(examples[i:i+1])
+        print('Example %d:'%i,examples[i:i+1].view(-1).max());
         scores,pred=interface.inference(examples[i:i+1].cuda());
         #print(scores.shape,labels[i:i+1])
+        print('Score %d:'%i,scores.view(-1).max());
         logp=F.log_softmax(scores,dim=1);
         loss=F.cross_entropy(logp,torch.LongTensor([labels[i]]).cuda());
         loss.backward();
         
         grads=[param.grad for param in interface.model.parameters()]
         
-        for param in grads:
+        for j,param in enumerate(grads):
+            print('Grad %d-%d:'%(i,j),param.data.view(-1).max());
             fvs_example_i=fvs_example_i+analyze(param.data.cuda(),nbins=nbins,szcap=szcap);
+            print('fv %d-%d:'%(i,j),fvs_example_i[-1].data.view(-1).max());
         
         fvs_examples.append(torch.stack(fvs_example_i,dim=0));
         
@@ -123,7 +127,7 @@ def run(interface,nbins=100,szcap=4096):
 
 
 #Fuzzing call for TrojAI R9
-def extract_fv(id=None, model_filepath=None, scratch_dirpath=None, examples_dirpath=None, scale_parameters_filepath=None,params=None):
+def extract_fv(id=None, model_filepath=None, scratch_dirpath=None, examples_dirpath=None, scale_parameters_filepath=None,root=None,params=None):
     t0=time.time();
     default_params=smartparse.obj();
     default_params.nbins=100
@@ -131,13 +135,20 @@ def extract_fv(id=None, model_filepath=None, scratch_dirpath=None, examples_dirp
     params = smartparse.merge(params,default_params);
     
     if not id is None:
-        model_filepath, scratch_dirpath, examples_dirpath, scale_parameters_filepath=helper.get_paths(id);
+        if not root is None:
+            model_filepath, scratch_dirpath, examples_dirpath, scale_parameters_filepath_=helper.get_paths(id,root=root);
+        else:
+            model_filepath, scratch_dirpath, examples_dirpath, scale_parameters_filepath_=helper.get_paths(id);
+        
+        if scale_parameters_filepath is None:
+            scale_parameters_filepath=scale_parameters_filepath_
     
     interface=helper.engine(model_filepath,examples_dirpath,scale_parameters_filepath);
     fvs=run(interface,nbins=params.nbins,szcap=params.szcap)
     
     print('Weight analysis done, time %.2f'%(time.time()-t0))
     return fvs
+
 
 if __name__ == "__main__":
     data=db.Table({'model_id':[],'model_name':[],'fvs':[],'label':[]}); # label currently incorrect

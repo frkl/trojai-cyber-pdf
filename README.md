@@ -30,14 +30,14 @@ This will produce a feature file `<root>/trojai-cyber-pdf/data_cyber-pdf_weight.
 Then run cross-validation hyperparameter search using the feature file and a pre-defined detector architecture
 
 ```
-python crossval_folds.py --arch arch.mlp_set5 --data data_cyber-pdf_weight.pt --nsplits 7
+python crossval_folds_v2.py --arch arch.mlp_set5 --data data_cyber-pdf_weight.pt --nsplits 7
 ```
 
-This will produce a set of learned detector parameters at `<root>/trojai-cyber-pdf/sessions/000000/`. 
+This will produce a set of learned detector parameters at `<root>/trojai-cyber-pdf/sessions/0000000/`. 
 
 Finally copy the detector parameters into a `learned_parameters` folder and build the singularity container.
 ```
-cp -r ./sessions/000000/ ./learned_parameters
+cp -r ./sessions/0000000/ ./learned_parameters
 ./build.sh
 ```
 

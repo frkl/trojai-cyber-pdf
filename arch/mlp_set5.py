@@ -48,9 +48,9 @@ class encoder(nn.Module):
         self.layers=nn.ModuleList();
         for i in range(nlayers):
             if i==0:
-                self.layers.append(nn.Conv2d(ninput,nh,3,padding=1));
+                self.layers.append(nn.Conv2d(ninput,nh,7,padding=3));
             else:
-                self.layers.append(nn.Conv2d(nh,nh,3,padding=1));
+                self.layers.append(nn.Conv2d(nh,nh,7,padding=3));
         
     
     
@@ -88,6 +88,12 @@ class new(nn.Module):
     
     def forward(self,data_batch):
         h=[];
+        fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
+        #shuffle first dim -- clean examples
+        if self.training:
+            fvs=[fv[torch.randperm(fv.shape[0])] for fv in fvs];
+        
+        
         fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
         fvs=[fv.view(1,fv.shape[0],fv.shape[1],-1).permute(0,3,1,2) for fv in fvs]
         h=torch.cat([self.encoder1(fv) for fv in fvs],dim=0);

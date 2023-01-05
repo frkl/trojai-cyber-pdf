@@ -27,3 +27,25 @@ infer \
 --schema_filepath=./metaparameters_schema.json \
 --learned_parameters_dirpath=./learned_parameters/ \
 --scale_parameters_filepath ./scale_params.npy
+
+
+
+python entrypoint.py configure \
+--scratch_dirpath ./scratch/ \
+--metaparameters_filepath ./metaparameters.json \
+--schema_filepath ./metaparameters_schema.json \
+--learned_parameters_dirpath ./learned_parameters \
+--configure_models_dirpath /work2/project/trojai-datasets/cyber-pdf-dec2022-train/models \
+--scale_parameters_filepath /work2/project/trojai-datasets/cyber-pdf-dec2022-train/scale_params.npy
+
+
+python entrypoint.py configure \
+--scratch_dirpath ./scratch/ \
+--metaparameters_filepath ./metaparameters.json \
+--schema_filepath ./metaparameters_schema.json \
+--learned_parameters_dirpath ./learned_parameters \
+--configure_models_dirpath /work2/project/trojai-datasets/cyber-pdf-dec2022-train/models \
+--scale_parameters_filepath /work2/project/trojai-datasets/cyber-pdf-dec2022-train/scale_params.npy \
+--automatic_configuration
+
+

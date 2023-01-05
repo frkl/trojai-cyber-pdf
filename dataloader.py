@@ -94,6 +94,24 @@ class new(db.Dataloader):
         
         return folds;
     
+    def generate_crossval_folds(self,nfolds=4):
+        ind=torch.randperm(self.size()).long();
+        folds=[];
+        for i in range(nfolds):
+            
+            ind_test=torch.arange(i,self.size(),nfolds).long();
+            ind_train=list(set(ind.tolist()).difference(ind_test.tolist()));
+            ind_train=torch.LongTensor(ind_train);
+            
+            split_train={'index':ind[ind_train]};
+            split_test={'index':ind[ind_test]};
+            
+            data_split_train=self.subsample(split_train);
+            data_split_test=self.subsample(split_test);
+            folds.append((data_split_train,data_split_test));
+        
+        return folds;
+    
     def generate_crossval_split(self,dtype='',tag='',seed=None):
         if not isinstance(tag,list):
             tag=[tag];

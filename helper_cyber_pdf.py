@@ -33,9 +33,11 @@ import torch
 warnings.filterwarnings("ignore")
 
 def get_paths(id,root='../trojai-datasets/cyber-pdf-dec2022-train'):
-    id='id-%08d'%id;
-    model_filepath=os.path.join(root,'models',id,'model.pt');
-    examples_dirpath=os.path.join(root,'models',id,'clean-example-data');
+    if not isinstance(id,str):
+        id='models/id-%08d'%id;
+    
+    model_filepath=os.path.join(root,id,'model.pt');
+    examples_dirpath=os.path.join(root,id,'clean-example-data');
     scratch_dirpath='./scratch'
     scale_parameters_filepath=os.path.join(root,'scale_params.npy');
     
@@ -68,6 +70,7 @@ class engine:
         scale_params = np.load(scale_parameters_filepath)
         scaler.mean_ = scale_params[0]
         scaler.scale_ = scale_params[1]
+        print('scaler',scaler.mean_[0],scaler.scale_[0])
         
         fvs=[]
         labels=[];

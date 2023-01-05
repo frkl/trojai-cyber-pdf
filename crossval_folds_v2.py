@@ -111,7 +111,7 @@ hp_config.append(hp.quniform('nlayers2',low=1,high=12,q=1));
 hp_config.append(hp.quniform('nlayers3',low=1,high=12,q=1));
 hp_config.append(hp.loguniform('margin',low=math.log(2),high=math.log(1e1)));
 #   OPT
-hp_config.append(hp.qloguniform('epochs',low=math.log(100),high=math.log(300),q=1));
+hp_config.append(hp.qloguniform('epochs',low=math.log(3),high=math.log(500),q=1));
 hp_config.append(hp.loguniform('lr',low=math.log(1e-5),high=math.log(1e-2)));
 hp_config.append(hp.loguniform('decay',low=math.log(1e-8),high=math.log(1e-3)));
 hp_config.append(hp.qloguniform('batch',low=math.log(8),high=math.log(64),q=1));
@@ -137,6 +137,9 @@ def configure_pipeline(params,arch,nh,nh2,nh3,nlayers,nlayers2,nlayers3,margin,e
 crossval_splits=[];
 #folds=[data.generate_random_crossval_split(pct=params.pct) for i in range(params.nsplits)];
 folds=data.generate_crossval_folds(nfolds=params.nsplits);
+folds+=data.generate_crossval_folds(nfolds=params.nsplits);
+folds+=data.generate_crossval_folds(nfolds=params.nsplits);
+folds+=data.generate_crossval_folds(nfolds=params.nsplits);
 crossval_splits=[(data_train,data_test,data_test) for data_train,data_test in folds]
 
 
@@ -148,21 +151,12 @@ def run_crossval(p):
     params_=configure_pipeline(params,arch,nh,nh2,nh3,nlayers,nlayers2,nlayers3,margin,epochs,lr,decay,batch);
     arch_=importlib.import_module(params_.arch);
     #Random splits N times
-    auc=[];
-    ce=[];
-    cepre=[];
-    results_by_key={};
     t0=time.time();
-    ensemble=[];
-    mistakes=[];
+    nets=[];
     for split_id,split in enumerate(crossval_splits):
         data_train,data_val,data_test=split;
         net=arch_.new(params_).cuda();
         opt=optim.Adam(net.parameters(),lr=params_.lr); #params_.lr
-        
-        #Train loop
-        best_loss=1e10;
-        best_net=copy.deepcopy(net);
         
         #Training
         for iter in range(params_.epochs):
@@ -191,40 +185,17 @@ def run_crossval(p):
                 opt.step();
             
             loss_total=sum(loss_total)/len(loss_total);
-            
-            #Eval every epoch 
-            '''
-            net.eval();
-            scores=[];
-            gt=[]
-            with torch.no_grad():
-                for data_batch in data_val.batches(max_batch):
-                    data_batch.cuda();
-                    
-                    C=data_batch['label'];
-                    data_batch.delete_column('label');
-                    scores_i=net.logp(data_batch);
-                    scores.append(scores_i.data.cpu());
-                    gt.append(C.data.cpu());
-            
-            scores=torch.cat(scores,dim=0);
-            gt=torch.cat(gt,dim=0);
-            
-            auc_i=sklearn.metrics.roc_auc_score(gt.numpy(),scores.numpy());
-            loss_i=float(F.binary_cross_entropy_with_logits(scores,gt.float()));
-            if best_loss>=loss_i:
-                best_loss=loss_i;
-                best_net=copy.deepcopy(net);
-            '''
-            #print('train %.4f, loss %.4f, auc %.4f'%(float(loss_total),float(loss_i),float(auc_i)))
-            #for g in opt.param_groups:
-            #    g['lr'] = g['lr']*0.98
         
         #Temperature-scaling calibration on val
-        #net=best_net;
         net.eval();
-        scores=[];
-        gt=[];
+        nets.append(net);
+    
+    #Calibration
+    scores=[];
+    gt=[];
+    for split_id,split in enumerate(crossval_splits):
+        data_train,data_val,data_test=split;
+        net=nets[split_id];
         for data_batch in data_val.batches(max_batch):
             data_batch.cuda();
             
@@ -233,25 +204,30 @@ def run_crossval(p):
             scores_i=net.logp(data_batch);
             scores.append(scores_i.data);
             gt.append(C);
+    
+    scores=torch.cat(scores,dim=0);
+    gt=torch.cat(gt,dim=0);
+    
+    T=torch.Tensor(1).fill_(0).cuda();
+    T.requires_grad_();
+    opt2=optim.Adamax([T],lr=3e-2);
+    for iter in range(500):
+        opt2.zero_grad();
+        loss=F.binary_cross_entropy_with_logits(scores*torch.exp(-T),gt.float().cuda());
+        loss.backward();
+        opt2.step();
+    
         
-        scores=torch.cat(scores,dim=0);
-        gt=torch.cat(gt,dim=0);
-        
-        T=torch.Tensor(1).fill_(0).cuda();
-        T.requires_grad_();
-        opt2=optim.Adamax([T],lr=3e-2);
-        for iter in range(500):
-            opt2.zero_grad();
-            loss=F.binary_cross_entropy_with_logits(scores*torch.exp(-T),gt.float());
-            loss.backward();
-            opt2.step();
-        
-        
-        #Eval
-        net.eval();
-        scores=[];
-        scores_pre=[];
-        gt=[]
+    #Eval & store
+    scores=[];
+    scores_pre=[];
+    gt=[]
+    model_id=[]
+    ensemble=[];
+    for split_id,split in enumerate(crossval_splits):
+        data_train,data_val,data_test=split;
+        net=nets[split_id];
+        ensemble.append({'net':net.state_dict(),'params':params_,'T':float(T.data.cpu())})
         for data_batch in data_test.batches(max_batch):
             data_batch.cuda();
             
@@ -261,73 +237,41 @@ def run_crossval(p):
             
             scores.append((scores_i*torch.exp(-T)).data.cpu());
             scores_pre.append(scores_i.data.cpu());
+            model_id=model_id+data_batch['model_id'];
             
             gt.append(C.data.cpu());
-        
-        scores=torch.cat(scores,dim=0);
-        scores_pre=torch.cat(scores_pre,dim=0);
-        gt=torch.cat(gt,dim=0);
-        
-        def compute_metrics(scores,gt,keys=None):
-            if not keys is None:
-                #slicing
-                categories=set([k for k in keys if not (k is None or k=='None')]);
-                results={};
-                for c in categories:
-                    ind=[i for i,k in enumerate(keys) if k==c or (k is None or k=='None')];
-                    scores_c=[scores[i] for i in ind];
-                    gt_c=[gt[i] for i in ind];
-                    auc_c,ce_c=compute_metrics(scores_c,gt_c);
-                    results[c]={'auc':auc_c,'ce':ce_c};
-                
-                return results;
-            else:
-                #Overall
-                auc=float(sklearn.metrics.roc_auc_score(torch.LongTensor(gt).numpy(),torch.Tensor(scores).numpy()));
-                ce=float(F.binary_cross_entropy_with_logits(torch.Tensor(scores),torch.Tensor(gt)));
-                return auc,ce;
-        
-        auc_i,ce_i=compute_metrics(scores.tolist(),gt.tolist());
-        _,ce_pre_i=compute_metrics(scores_pre.tolist(),gt.tolist());
-        for i in range(len(gt)):
-            if int(gt[i])==1 and float(scores[i])<=0:
-                mistakes.append(params.nsplits*i+split_id);
-        
-        
-        for result_key in []:#'task_type','trigger_option','trigger_type']:
-            results_i=compute_metrics(scores.tolist(),gt.tolist(),data_test.data['table_ann'][result_key])
-            for k in results_i:
-                if not k in results_by_key:
-                    results_by_key[k]={'auc':[],'ce':[]};
-                results_by_key[k]['auc'].append(results_i[k]['auc'])
-                results_by_key[k]['ce'].append(results_i[k]['ce']);
-        
-        auc.append(auc_i);
-        ce.append(ce_i);
-        cepre.append(ce_pre_i);
-        session.log('Split %d, loss %.4f (%.4f), auc %.4f, time %f'%(split_id,ce_i,ce_pre_i,auc_i,time.time()-t0));
-        
-        ensemble.append({'net':net.cpu().state_dict(),'params':params_,'T':float(T.data.cpu())})
+    
+    scores=torch.cat(scores,dim=0);
+    scores_pre=torch.cat(scores_pre,dim=0);
+    gt=torch.cat(gt,dim=0);
+    
+    def compute_metrics(scores,gt,keys=None):
+        #Overall
+        auc=float(sklearn.metrics.roc_auc_score(torch.LongTensor(gt).numpy(),torch.Tensor(scores).numpy()));
+        #ce_=float(F.binary_cross_entropy_with_logits(torch.Tensor(scores),torch.Tensor(gt)));
+        sgt=F.logsigmoid(torch.Tensor(scores)*(torch.Tensor(gt)*2-1))
+        ce=-sgt.mean();
+        cestd=sgt.std()/len(sgt)**0.5;
+        return auc,ce,cestd;
+    
+    auc,ce,cestd=compute_metrics(scores.tolist(),gt.tolist());
+    _,cepre,ceprestd=compute_metrics(scores_pre.tolist(),gt.tolist());
+    mistakes=[];
+    for i in range(len(gt)):
+        if int(gt[i])==1 and float(scores[i])<=0:
+            mistakes.append(model_id[i]);
     
     mistakes=sorted(mistakes);
-    session.log('Mistakes: '+','.join(['%d'%i for i in mistakes]));
-    auc=torch.Tensor(auc);
-    ce=torch.Tensor(ce);
-    cepre=torch.Tensor(cepre);
     
-    if float(cepre.mean()+2*ce.std())<best_loss_so_far:
-        best_loss_so_far=float(cepre.mean()+2*ce.std());
+    if float(cepre+0*ceprestd)<best_loss_so_far:
+        best_loss_so_far=float(cepre+0*ceprestd);
         torch.save(ensemble,session.file('model.pt'))
     
-    session.log('AUC: %f + %f, CE: %f + %f, CEpre: %f + %f (%s (%d,%d,%d), epochs %d, batch %d, lr %f, decay %f)'%(auc.mean(),2*auc.std(),ce.mean(),2*ce.std(),cepre.mean(),2*cepre.std(),arch,nlayers,nlayers2,nh,epochs,batch,lr,decay));
+    session.log('AUC: %f, CE: %f + %f, CEpre: %f + %f, time %.2f      (%s (%d,%d,%d), epochs %d, batch %d, lr %f, decay %f)'%(auc,ce,cestd,cepre,ceprestd,time.time()-t0,arch,nlayers,nlayers2,nh,epochs,batch,lr,decay));
+    session.log('Mistakes: '+','.join(['%d'%i for i in mistakes]));
+    print('\n')
     
-    goal=float(cepre.mean()+2*ce.std());#-2*auc.std()
-    #goal=float(cepre.mean());
-    
-    for k in results_by_key:
-        auc=torch.Tensor(results_by_key[k]['auc']);
-        ce=torch.Tensor(results_by_key[k]['ce']);
-        session.log('\t KEY %s, AUC: %f + %f, CE: %f + %f'%(k,auc.mean(),2*auc.std(),ce.mean(),2*ce.std()));
+    goal=float(cepre+0*ceprestd)
     
     return goal;
 
