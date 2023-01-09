@@ -38,6 +38,7 @@ This will produce a set of learned detector parameters at `<root>/trojai-cyber-p
 Finally copy the detector parameters into a `learned_parameters` folder and build the singularity container.
 ```
 cp -r ./sessions/0000000/ ./learned_parameters
+python metafile_generator.py
 ./build.sh
 ```
 
