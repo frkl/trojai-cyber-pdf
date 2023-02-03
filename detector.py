@@ -35,6 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import util.smartparse as smartparse
 import util.db as db
+import copy
 
 
 class Detector(AbstractDetector):
@@ -129,7 +130,8 @@ class Detector(AbstractDetector):
             opt=optim.Adam(net.parameters(),lr=params_.lr); #params_.lr
             
             #Training
-            for iter in range(params_.epochs):
+            best_loss=1e10
+            for iter in range(500):
                 #print('iter %d/%d'%(iter,params_.epochs))
                 net.train();
                 for data_batch in data_train.batches(params_.batch,shuffle=True,full=True):
@@ -151,6 +153,27 @@ class Detector(AbstractDetector):
                     loss=loss+l2*params_.decay;
                     loss.backward();
                     opt.step();
+                
+                net.eval();
+                ce=[];
+                for data_batch in data_val.batches(max_batch):
+                    data_batch.cuda();
+                    
+                    C=data_batch['label'];
+                    data_batch.delete_column('label');
+                    scores_i=net.logp(data_batch);
+                    loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
+                    ce.append(float(loss));
+                
+                ce=sum(ce)/len(ce)
+                if (iter+1)%100==0:
+                    print('%d, loss %.4f / %.4f, %.4f'%(iter,loss_total,ce,best_loss))
+                
+                if ce<best_loss:
+                    best_net=copy.deepcopy(net);
+                    best_loss=ce;
+            
+            net=best_net;
             
             net.eval();
             nets.append(net);
@@ -238,8 +261,8 @@ class Detector(AbstractDetector):
     #Retraining logic
     def automatic_configure(self, models_dirpath: str):
         #Extract dataset
-        #data=self.extract_dataset(models_dirpath,params=self.params)
-        data='data_cyber-pdf_weight.pt'
+        data=self.extract_dataset(models_dirpath,params=self.params)
+        #data='data_cyber-pdf_weight.pt'
         #Create dataloader
         import dataloader
         data=dataloader.new(data)
@@ -255,9 +278,9 @@ class Detector(AbstractDetector):
         
         #Create crossval folds
         folds=data.generate_crossval_folds(nfolds=self.params.nsplits);
-        folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
-        folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
-        folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        #folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        #folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
+        #folds+=data.generate_crossval_folds(nfolds=self.params.nsplits);
         crossval_splits=[(data_train,data_test,data_test) for data_train,data_test in folds] #train val test
         
         #Perform training
@@ -295,6 +318,24 @@ class Detector(AbstractDetector):
         #fvs=db.Table.from_rows([{'fvs':fv}]);
         fvs=db.Table({'fvs':[fv]})
         
+        
+        #DEBUG: check whether the extracted features are consistent with entries in pre-extracted datasets
+        fvs_=torch.load(os.path.join(self.learned_parameters_dirpath,'data_cyber-pdf_weight.pt'))
+        sim=[];
+        for i in range(len(fvs_['table_ann']['fvs'])):
+            try:
+                d=fvs_['table_ann']['fvs'][i]-fvs['fvs'][0]
+                d=d.abs().mean();
+                sim.append((fvs_['table_ann']['model_name'][i],d))
+            except:
+                pass
+        
+        
+        
+        print(sim)
+        
+        
+        
         import importlib
         import pandas
         logging.info('Running Trojan classifier')
@@ -317,12 +358,14 @@ class Detector(AbstractDetector):
                 net.eval();
                 
                 s_i=net.logp(fvs).data.cpu();
-                s_i=s_i#*math.exp(-checkpoint[i]['T']);
+                s_i=s_i*math.exp(-checkpoint[i]['T']);
                 scores.append(float(s_i))
             
+            print(scores)
             scores=sum(scores)/len(scores);
             scores=torch.sigmoid(torch.Tensor([scores])); #score -> probability
             trojan_probability=float(scores);
+            print(trojan_probability)
         else:
             trojan_probability=0.5;
         

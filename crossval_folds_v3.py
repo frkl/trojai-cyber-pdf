@@ -131,11 +131,11 @@ hp_config.add('qloguniform','nh3',low=math.log(16),high=math.log(512),q=1);
 hp_config.add('quniform','nlayers',low=1,high=12,q=1);
 hp_config.add('quniform','nlayers2',low=1,high=12,q=1);
 hp_config.add('quniform','nlayers3',low=1,high=12,q=1);
-hp_config.add('loguniform','margin',low=math.log(2),high=math.log(1e1));
+#hp_config.add('loguniform','margin',low=math.log(2),high=math.log(1e1));
 #   OPT
 #hp_config.add('qloguniform','epochs',low=math.log(3),high=math.log(300),q=1);
 hp_config.add('loguniform','lr',low=math.log(1e-5),high=math.log(1e-2));
-hp_config.add('loguniform','decay',low=math.log(1e-5),high=math.log(1e-2));
+hp_config.add('loguniform','decay',low=math.log(1e-8),high=math.log(1e-3));
 hp_config.add('qloguniform','batch',low=math.log(8),high=math.log(64),q=1);
 
 '''
@@ -204,14 +204,14 @@ def run_crossval(p):
     for split_id,split in enumerate(crossval_splits):
         data_train,data_val,data_test=split;
         net=arch_.new(params_).cuda();
-        opt=optim.Adam(net.parameters(),lr=params_.lr); #params_.lr
-        #opt=optim.Adam(net.parameters(),lr=1e-4); #params_.lr
+        #opt=optim.Adam(net.parameters(),lr=params_.lr); #params_.lr
+        opt=optim.Adam(net.parameters(),lr=1e-4); #params_.lr
         
         #Training
         #for iter in range(params_.epochs):
         best_net=net
         best_loss=1e10;
-        for iter in range(600):
+        for iter in range(300):
             #print('iter %d/%d'%(iter,params_.epochs))
             net.train();
             loss_total=[];
@@ -221,22 +221,21 @@ def run_crossval(p):
                 data_batch.cuda();
                 C=data_batch['label'];
                 data_batch.delete_column('label');
-                
+                '''
                 scores_i=net(data_batch);
                 spos=scores_i.gather(1,C.view(-1,1)).mean();
                 sneg=torch.exp(scores_i).mean();
                 loss=-(spos-sneg+1);
+                '''
                 
-                
-                #scores_i=net.logp(data_batch)
-                #loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
+                scores_i=net.logp(data_batch)
+                loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
                 l2=0;
                 for p in net.parameters():
                     l2=l2+(p**2).sum();
                 
                 #print(float(loss))
                 loss=loss+l2*params_.decay;
-                #loss=loss+l2*3e-4;
                 loss.backward();
                 loss_total.append(float(loss));
                 opt.step();
@@ -256,7 +255,7 @@ def run_crossval(p):
             
             ce=sum(ce)/len(ce)
             if (iter+1)%100==0:
-                print('%d, loss %.4f / %.4f, %.4f'%(iter,loss_total,ce,best_loss))
+                print('%d, loss %.4f / %.4f'%(iter,loss_total,ce))
             
             if ce<best_loss:
                 best_net=copy.deepcopy(net);

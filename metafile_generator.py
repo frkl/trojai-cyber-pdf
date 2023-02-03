@@ -10,6 +10,7 @@ params.pop('argv')
 params.pop('tag')
 params.pop('budget')
 params.pop('stuff')
+params.pop('epochs')
 
 #Common hyperparam template
 hp_config={};
@@ -25,7 +26,7 @@ hp_config['nlayers3']=['int',1,12]
 hp_config['margin']=['float',2,10]
 hp_config['epochs']=['int',3,500]
 hp_config['lr']=['float',1e-5,1e-2]
-hp_config['decay']=['float',1e-8,1e-3]
+hp_config['decay']=['float',1e-8,1e-2]
 hp_config['batch']=['int',8,64]
 
 hp_config['nsplits']=['int',1,10]

@@ -74,19 +74,20 @@ class engine:
         
         fvs=[]
         labels=[];
-        for examples_dir_entry in os.scandir(examples_dirpath):
-            if examples_dir_entry.is_file() and examples_dir_entry.name.endswith(".npy"):
-                feature_vector = np.load(examples_dir_entry.path).reshape(1, -1)
-                feature_vector = torch.from_numpy(scaler.transform(feature_vector.astype(float))).float()
-                
-                fvs.append(feature_vector)
-                
-                ground_tuth_filepath = examples_dir_entry.path + ".json"
-                
-                with open(ground_tuth_filepath, 'r') as ground_truth_file:
-                    ground_truth =  ground_truth_file.readline()
-                
-                labels.append(int(ground_truth));
+        fnames=[fname for fname in os.listdir(examples_dirpath) if os.path.isfile(os.path.join(examples_dirpath,fname)) and fname.endswith('.npy')]
+        fnames=sorted(fnames)
+        for fname in fnames:
+            feature_vector = np.load(os.path.join(examples_dirpath,fname)).reshape(1, -1)
+            feature_vector = torch.from_numpy(scaler.transform(feature_vector.astype(float))).float()
+            
+            fvs.append(feature_vector)
+            
+            ground_tuth_filepath = os.path.join(examples_dirpath,fname) + ".json"
+            
+            with open(ground_tuth_filepath, 'r') as ground_truth_file:
+                ground_truth =  ground_truth_file.readline()
+            
+            labels.append(int(ground_truth));
         
         
         fvs=torch.cat(fvs,dim=0);

@@ -35,7 +35,7 @@ class MLP(nn.Module):
             h=F.relu(h);
             #h=F.dropout(h,training=self.training);
         
-        h=self.layers[-1](h);
+        h=self.layers[-1](h).view(*(list(x.shape[:-1])+[-1]));
         return h
 
 
@@ -77,9 +77,13 @@ class new(nn.Module):
         nlayers=params.nlayers
         nlayers2=params.nlayers2
         nlayers3=params.nlayers3
+        self.margin=params.margin
         
-        self.encoder1=encoder(600,nh,nlayers);
-        self.encoder2=MLP(nh,nh2,2,nlayers2);
+        self.encoder1=MLP(2400,nh,nh,nlayers);
+        #self.encoder1=MLP(2400,512,512,4);
+        #self.encoder2=MLP(nh,nh2,nh2,nlayers2);
+        self.encoder3=MLP(nh,nh2,2,nlayers2);
+        #self.encoder3=MLP(512,512,2,4);
         
         self.w=nn.Parameter(torch.Tensor(1).fill_(1));
         self.b=nn.Parameter(torch.Tensor(1).fill_(0));
@@ -89,20 +93,13 @@ class new(nn.Module):
     def forward(self,data_batch):
         h=[];
         fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
-        #shuffle first dim -- clean examples
-        for i in range(5):
-            #if self.training:
-            fvs_i=[fv[torch.randperm(fv.shape[0])] for fv in fvs];
-            
-            
-            fvs_i=[fv.view(1,fv.shape[0],fv.shape[1],-1).permute(0,3,1,2) for fv in fvs_i]
-            h_i=torch.cat([self.encoder1(fv) for fv in fvs_i],dim=0);
-            h.append(h_i)
+        fvs=[fv[:,-4:,:].view(-1,2400) for fv in fvs];
+        fvs=[torch.log(fv.abs()*1e6+1)/10*torch.sign(fv) for fv in fvs];
+        h=torch.stack(fvs,dim=0);
+        h=self.encoder1(h).mean(dim=-2);
+        h=self.encoder3(h);
         
-        h=torch.stack(h,dim=0).mean(dim=0)
-        h=self.encoder2(h);
-        
-        h=torch.tanh(h)*8;
+        h=torch.tanh(h)*self.margin;
         return h
     
     def logp(self,data_batch):

@@ -4,7 +4,7 @@
   "technique": "Hybrid gradient-based and weight-based analysis",
   "technique_description": "For each clean example and for each weight matrix in the network, compute value histograms and eigenvalue histograms as features for loss gradients to that weight matrix. That produces a feature map of num. examples by num. weights by feature length. A 2D convolutional network with average pooling was used to processes the feature map for Trojan detection.",
   "technique_changes": "Added retraining functionalities. Fixed an issue with overfitting. ",
-  "commit_id": "",
+  "commit_id": "c631cabf8eee39a030326d3a9dac532affdcf9d1",
   "repo_name": "https://github.com/frkl/trojai-cyber-pdf",
   "required": [],
   "additionalProperties": false,
