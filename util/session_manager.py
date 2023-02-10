@@ -6,6 +6,24 @@ import json
 from collections import OrderedDict
 
 
+def create_session(params):
+    try:
+        session_dir=params.session_dir;
+    except:
+        session_dir=None;
+    
+    session=Session(session_dir=session_dir); #Create session
+    torch.save({'params':params},session.file('params.pt'));
+    pmvs=vars(params);
+    pmvs=dict([(k,pmvs[k]) for k in pmvs if not(k=='stuff')]);
+    print(pmvs);
+    f=open(session.file('params.json'),'w');
+    json.dump(pmvs,f); #Write a human-readable parameter json
+    f.close();
+    session.file('model','dummy');
+    return session;
+
+
 class loss_tracker:
     def __init__(self):
         self.loss=OrderedDict();

@@ -79,10 +79,14 @@ class new(nn.Module):
         nlayers3=params.nlayers3
         self.margin=params.margin
         
-        self.encoder1=MLP(2400,nh,nh,nlayers);
+        net=torchvision.models.resnet18()
+        self.encoder=nn.Sequential(*list(net.children())[:-1])
+        
+        #self.encoder1=MLP(512,nh,nh2,nlayers);
         #self.encoder1=MLP(2400,512,512,4);
         #self.encoder2=MLP(nh,nh2,nh2,nlayers2);
-        self.encoder3=MLP(nh,nh2,2,nlayers2);
+        #self.encoder3=MLP(512,nh3,2,nlayers2);
+        self.encoder3=nn.Linear(512,2);
         #self.encoder3=MLP(512,512,2,4);
         
         self.w=nn.Parameter(torch.Tensor(1).fill_(1));
@@ -92,11 +96,18 @@ class new(nn.Module):
     
     def forward(self,data_batch):
         h=[];
-        fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
-        fvs=[fv[:,-4:,:].view(-1,2400) for fv in fvs];
-        fvs=[torch.log(fv.abs()*1e6+1)/10*torch.sign(fv) for fv in fvs];
-        h=[self.encoder1(fv).mean(dim=-2) for fv in fvs];
-        h=torch.stack(h,dim=0);
+        #fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
+        fvs=data_batch['fvs']
+        #print(fvs[0].shape)
+        fvs=[fv[-3:,:,:].cuda().contiguous() for fv in fvs];
+        fvs=torch.stack(fvs,dim=0);
+        ind=list(range(350))+(torch.randperm(20)+350).tolist()
+        fvs=fvs[:,:,ind]
+        fvs=fvs[:,:,:,ind]
+        h=self.encoder(fvs).view(-1,512)
+        #print(h.shape)
+        #fvs=torch.log1p(fvs.abs()*1e5)*torch.sign(fvs);
+        #h=self.encoder1(fvs).mean(dim=-2);
         h=self.encoder3(h);
         
         h=torch.tanh(h)*self.margin;

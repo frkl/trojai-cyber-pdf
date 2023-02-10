@@ -10,13 +10,13 @@ python entrypoint.py infer \
 --scale_parameters_filepath ./scale_params.npy
 
 
-sudo singularity build cyber-pdf-dec2022_sts_SRI_weight_grad_v1.simg trojan_detector.def 
+sudo singularity build cyber-pdf-dec2022_sts_SRI_trinity_v0.simg trojan_detector.def 
 
 
 singularity run \
 --bind /work2/project/trojai-cyber-pdf \
 --nv \
-./cyber-pdf-dec2022_sts_SRI_weight_grad_v1.simg \
+./cyber-pdf-dec2022_sts_SRI_trinity_v0.simg \
 infer \
 --model_filepath=./model/id-00000002/model.pt \
 --result_filepath=./output.txt \

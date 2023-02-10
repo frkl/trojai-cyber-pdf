@@ -7,6 +7,7 @@ from builtins import range
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import torch.optim as optim
 import numpy
 import math
@@ -79,7 +80,7 @@ meta_table=db.Table(meta_table)
 assert 'model_name' in data.data['table_ann'].d.keys()
 
 
-data.data['table_ann']=db.left_join(data.data['table_ann'],meta_table,'model_name');
+#data.data['table_ann']=db.left_join(data.data['table_ann'],meta_table,'model_name');
 
 for k in data.data['table_ann'].d.keys():
     if isinstance(data.data['table_ann'][k],list):
@@ -133,9 +134,9 @@ hp_config.add('quniform','nlayers2',low=1,high=12,q=1);
 hp_config.add('quniform','nlayers3',low=1,high=12,q=1);
 hp_config.add('loguniform','margin',low=math.log(2),high=math.log(1e1));
 #   OPT
-#hp_config.add('qloguniform','epochs',low=math.log(3),high=math.log(300),q=1);
+hp_config.add('qloguniform','epochs',low=math.log(3),high=math.log(300),q=1);
 hp_config.add('loguniform','lr',low=math.log(1e-5),high=math.log(1e-2));
-hp_config.add('loguniform','decay',low=math.log(1e-5),high=math.log(1e-2));
+hp_config.add('loguniform','decay',low=math.log(1e-8),high=math.log(1e-3));
 hp_config.add('qloguniform','batch',low=math.log(8),high=math.log(64),q=1);
 
 '''
@@ -185,101 +186,137 @@ folds=data.generate_crossval_folds(nfolds=params.nsplits);
 #folds+=data.generate_crossval_folds(nfolds=params.nsplits);
 crossval_splits=[(data_train,data_test,data_test) for data_train,data_test in folds]
 
+class Dataset:
+    def __init__(self,split):
+        self.data=split;
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self,i):
+        data=self.data[i];
+        #t={k:data[k].cuda() for k in data if torch.is_tensor(data[k])}
+        #data.update(t);
+        return data
+
+def collate(x):
+    x=db.Table.from_rows(x)
+    return x;
+
+def train(data_train,data_val=None,params_=None):
+    data_train=Dataset(data_train);
+    if not data_val is None:
+        data_val=Dataset(data_val);
+    
+    arch_=importlib.import_module(params_.arch);
+    net=arch_.new(params_).cuda();
+    opt=optim.Adam(net.parameters(),lr=params_.lr); 
+    
+    #Training
+    #for iter in range(params_.epochs):
+    best_net=copy.deepcopy(net)
+    best_loss=1e10;
+    
+    for iter in range(params_.epochs):
+        loader_train = DataLoader(data_train,collate_fn=collate,batch_size=params_.batch,shuffle=True,drop_last=True,num_workers=0);
+        net.train();
+        loss_total=[];
+        for data_batch in loader_train:
+            opt.zero_grad();
+            #data_batch.cuda();
+            C=torch.LongTensor(data_batch['label']).cuda();
+            scores_i=net(data_batch);
+            
+            spos=scores_i.gather(1,C.view(-1,1)).mean();
+            sneg=torch.exp(scores_i).mean();
+            loss=-(spos-sneg+1);
+            
+            #scores_i=net.logp(data_batch)
+            #loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
+            
+            l2=torch.stack([(p**2).sum() for p in net.parameters()],dim=0).sum()
+            
+            #print(float(loss))
+            loss=loss+l2*params_.decay;
+            loss.backward();
+            loss_total.append(float(loss));
+            opt.step();
+        
+        loss_total=sum(loss_total)/len(loss_total);
+        
+        '''
+        if (iter+1)%10==0:
+            if not data_val is None:
+                loader_val = DataLoader(data_val,collate_fn=db.Table.from_rows,batch_size=64,shuffle=False,num_workers=0);
+                net.eval();
+                ce=[];
+                for data_batch in loader_val:
+                    data_batch.cuda();
+                    C=torch.LongTensor(data_batch['label']).cuda();
+                    scores_i=net.logp(data_batch);
+                    loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
+                    ce+=[float(loss) for i in range(len(data_batch))]
+                
+                ce=sum(ce)/len(ce)
+                if (iter+1)%100==0:
+                    print('%d, loss %.4f / %.4f, %.4f'%(iter,loss_total,ce,best_loss))
+                
+                if ce<best_loss:
+                    best_net=copy.deepcopy(net);
+                    best_loss=ce;
+            else:
+                best_net=copy.deepcopy(net);
+        '''
+    
+    return net
+
+
 
 best_loss_so_far=1e10;
+num_runs=0
+fill_runs=50;
 def run_crossval(p):
     global best_loss_so_far
+    global num_runs
+    num_runs=num_runs+1
+    if num_runs<fill_runs:
+        splits=crossval_splits[:1];
+    else:
+        splits=crossval_splits;
+    
     max_batch=16;
     #arch,nh,nh2,nh3,nlayers,nlayers2,nlayers3,margin,epochs,lr,decay,batch=p;
     #params_=configure_pipeline(params,arch,nh,nh2,nh3,nlayers,nlayers2,nlayers3,margin,epochs,lr,decay,batch);
     
     params_d=hp_config.parse(*p);
     params_=smartparse.dict2obj(params_d)
-    params_=smartparse.merge(params_,params);
     
-    arch_=importlib.import_module(params_.arch);
-    #Random splits N times
+    #debug
+    #checkpoint='learned_parameters/model.pt'
+    #tmp=torch.load(checkpoint)
+    #params_=tmp[0]['params']
+    
+    
+    params_=smartparse.merge(params_,params);
     t0=time.time();
+    
+    #Training
     nets=[];
-    for split_id,split in enumerate(crossval_splits):
+    for split_id,split in enumerate(splits):
         data_train,data_val,data_test=split;
-        net=arch_.new(params_).cuda();
-        opt=optim.Adam(net.parameters(),lr=params_.lr); #params_.lr
-        #opt=optim.Adam(net.parameters(),lr=1e-4); #params_.lr
-        
-        #Training
-        #for iter in range(params_.epochs):
-        best_net=net
-        best_loss=1e10;
-        for iter in range(600):
-            #print('iter %d/%d'%(iter,params_.epochs))
-            net.train();
-            loss_total=[];
-            for data_batch in data_train.batches(params_.batch,shuffle=True,full=True):
-                opt.zero_grad();
-                net.zero_grad();
-                data_batch.cuda();
-                C=data_batch['label'];
-                data_batch.delete_column('label');
-                
-                scores_i=net(data_batch);
-                spos=scores_i.gather(1,C.view(-1,1)).mean();
-                sneg=torch.exp(scores_i).mean();
-                loss=-(spos-sneg+1);
-                
-                
-                #scores_i=net.logp(data_batch)
-                #loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
-                l2=0;
-                for p in net.parameters():
-                    l2=l2+(p**2).sum();
-                
-                #print(float(loss))
-                loss=loss+l2*params_.decay;
-                #loss=loss+l2*3e-4;
-                loss.backward();
-                loss_total.append(float(loss));
-                opt.step();
-            
-            loss_total=sum(loss_total)/len(loss_total);
-            
-            net.eval();
-            ce=[];
-            for data_batch in data_val.batches(max_batch):
-                data_batch.cuda();
-                
-                C=data_batch['label'];
-                data_batch.delete_column('label');
-                scores_i=net.logp(data_batch);
-                loss=F.binary_cross_entropy_with_logits(scores_i,C.float());
-                ce.append(float(loss));
-            
-            ce=sum(ce)/len(ce)
-            if (iter+1)%100==0:
-                print('%d, loss %.4f / %.4f, %.4f'%(iter,loss_total,ce,best_loss))
-            
-            if ce<best_loss:
-                best_net=copy.deepcopy(net);
-                best_loss=ce;
-        
-        net=best_net;
-        #Temperature-scaling calibration on val
-        net.eval();
-        
-        
-        nets.append(net);
+        net=train(data_train.data['table_ann'],data_val.data['table_ann'],params_)
+        nets.append(net)
     
     #Calibration
     scores=[];
     gt=[];
-    for split_id,split in enumerate(crossval_splits):
+    for split_id,split in enumerate(splits):
         data_train,data_val,data_test=split;
         net=nets[split_id];
         for data_batch in data_val.batches(max_batch):
             data_batch.cuda();
             
             C=data_batch['label'];
-            data_batch.delete_column('label');
             scores_i=net.logp(data_batch);
             scores.append(scores_i.data);
             gt.append(C);
@@ -296,14 +333,14 @@ def run_crossval(p):
         loss.backward();
         opt2.step();
     
-        
+    
     #Eval & store
     scores=[];
     scores_pre=[];
     gt=[]
     model_id=[]
     ensemble=[];
-    for split_id,split in enumerate(crossval_splits):
+    for split_id,split in enumerate(splits):
         data_train,data_val,data_test=split;
         net=nets[split_id];
         ensemble.append({'net':net.state_dict(),'params':params_,'T':float(T.data.cpu())})
@@ -342,12 +379,13 @@ def run_crossval(p):
     
     mistakes=sorted(mistakes);
     
-    if float(ce+0*ceprestd)<best_loss_so_far:
+    if num_runs>=fill_runs and float(ce+0*ceprestd)<best_loss_so_far:
         best_loss_so_far=float(ce+0*ceprestd);
         torch.save(ensemble,session.file('model.pt'))
     
     session.log('AUC: %f, CE: %f + %f, CEpre: %f + %f, time %.2f      (%s)'%(auc,ce,cestd,cepre,ceprestd,time.time()-t0,json.dumps(params_d)));
     session.log('Mistakes: '+','.join(['%d'%i for i in mistakes]));
+    session.log('Best-so-far-%f'%(best_loss_so_far));
     print('\n')
     
     goal=float(ce+0*ceprestd)

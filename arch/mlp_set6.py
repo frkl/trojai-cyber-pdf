@@ -8,6 +8,12 @@ import math
 from collections import OrderedDict as OrderedDict
 import copy
 
+def pool(x,bins=100,dim=0):
+    q=torch.arange(bins).float()/(bins-1)
+    x=torch.quantile(x,q.to(x.device),dim=dim,keepdim=True).contiguous()
+    x=x.transpose(dim+1,0).contiguous().squeeze(0)
+    return x;
+
 class MLP(nn.Module):
     def __init__(self,ninput,nh,noutput,nlayers):
         super().__init__()
@@ -70,6 +76,8 @@ class new(nn.Module):
     def __init__(self,params):
         super(new,self).__init__()
         
+        self.ninput=200
+        self.bins=10;
         
         nh=params.nh;
         nh2=params.nh2;
@@ -79,11 +87,8 @@ class new(nn.Module):
         nlayers3=params.nlayers3
         self.margin=params.margin
         
-        self.encoder1=MLP(2400,nh,nh,nlayers);
-        #self.encoder1=MLP(2400,512,512,4);
-        #self.encoder2=MLP(nh,nh2,nh2,nlayers2);
-        self.encoder3=MLP(nh,nh2,2,nlayers2);
-        #self.encoder3=MLP(512,512,2,4);
+        self.encoder1=MLP(self.ninput*self.bins,nh,nh2,nlayers);
+        self.encoder3=MLP(nh2,nh3,2,nlayers2);
         
         self.w=nn.Parameter(torch.Tensor(1).fill_(1));
         self.b=nn.Parameter(torch.Tensor(1).fill_(0));
@@ -92,9 +97,11 @@ class new(nn.Module):
     
     def forward(self,data_batch):
         h=[];
-        fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
-        fvs=[fv[:,-4:,:].view(-1,2400) for fv in fvs];
-        fvs=[torch.log(fv.abs()*1e6+1)/10*torch.sign(fv) for fv in fvs];
+        #fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
+        fvs=data_batch['fvs'] #N nlayers h
+        
+        fvs=[pool(fv.cuda(),self.bins,dim=0).transpose(0,1).contiguous().view(-1,self.bins*self.ninput) for fv in fvs];
+        fvs=[torch.log1p(fv.abs()*1e3)*torch.sign(fv) for fv in fvs];
         h=[self.encoder1(fv).mean(dim=-2) for fv in fvs];
         h=torch.stack(h,dim=0);
         h=self.encoder3(h);

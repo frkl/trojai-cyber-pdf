@@ -1,1 +1,1 @@
-{"nsplits": 4, "pct": 0.5, "arch": "arch.mlp_set5c", "data": "./data_cyber-pdf_weight.pt", "tag": "", "session_dir": null, "budget": 10000, "argv": ["crossval_folds_v2.py", "--data", "./data_cyber-pdf_weight.pt", "--arch", "arch.mlp_set5c"]}
+{"arch": "arch.mlp_set5f", "session_dir": null, "data": "data_r12_trinity_v0", "argv": ["crossval.py", "--arch", "arch.mlp_set5f"]}

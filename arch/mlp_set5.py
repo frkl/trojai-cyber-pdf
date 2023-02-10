@@ -78,7 +78,7 @@ class new(nn.Module):
         nlayers2=params.nlayers2
         nlayers3=params.nlayers3
         
-        self.encoder1=encoder(600,nh,nlayers);
+        self.encoder1=encoder(200,nh,nlayers);
         self.encoder2=MLP(nh,nh2,2,nlayers2);
         
         self.w=nn.Parameter(torch.Tensor(1).fill_(1));
@@ -89,15 +89,15 @@ class new(nn.Module):
     def forward(self,data_batch):
         h=[];
         fvs=[fv.to(self.w.device) for fv in data_batch['fvs']];
+        fvs=[torch.log1p(fv.abs()*1e3)*torch.sign(fv) for fv in fvs];
         #shuffle first dim -- clean examples
-        for i in range(5):
-            #if self.training:
-            fvs_i=[fv[torch.randperm(fv.shape[0])] for fv in fvs];
-            
-            
-            fvs_i=[fv.view(1,fv.shape[0],fv.shape[1],-1).permute(0,3,1,2) for fv in fvs_i]
-            h_i=torch.cat([self.encoder1(fv) for fv in fvs_i],dim=0);
-            h.append(h_i)
+        #if self.training:
+        fvs_i=[fv[torch.randperm(fv.shape[0])] for fv in fvs];
+        
+        
+        fvs_i=[fv.view(1,fv.shape[0],fv.shape[1],-1).permute(0,3,1,2) for fv in fvs_i]
+        h_i=torch.cat([self.encoder1(fv) for fv in fvs_i],dim=0);
+        h.append(h_i)
         
         h=torch.stack(h,dim=0).mean(dim=0)
         h=self.encoder2(h);
